@@ -6,6 +6,7 @@
 //! each edit.
 
 use crate::diff::{DiffModel, DiffOptions, inline_diff};
+use crate::json_format;
 use crate::text_file::{self, Loaded, TextFile};
 use eframe::egui::{
     self, Color32, CursorIcon, Event, FontId, Galley, Id, Key, Modifiers, Pos2, Rect, Sense, Stroke, Ui, Vec2,
@@ -154,6 +155,8 @@ struct Edit {
     before: (Pos, Pos),
     after: Pos,
     kind: EditKind,
+    /// Undone and redone together with the edit before it (e.g. formatting both sides).
+    joined: bool,
 }
 
 struct Metrics {
@@ -444,7 +447,7 @@ impl FileCompare {
             let removed = self.panes[side].file.lines[start..end.min(self.panes[side].file.lines.len())].to_vec();
             self.apply(side, start, end - start, &new);
             self.panes[side].depth += 1;
-            self.undo.push(Edit { side, start, removed, inserted: new, before, after, kind });
+            self.undo.push(Edit { side, start, removed, inserted: new, before, after, kind, joined: false });
         }
 
         let pane = &mut self.panes[side];
@@ -554,26 +557,69 @@ impl FileCompare {
     }
 
     fn undo(&mut self) {
-        let Some(e) = self.undo.pop() else { return };
-        self.apply(e.side, e.start, e.inserted.len(), &e.removed);
-        let pane = &mut self.panes[e.side];
-        pane.depth -= 1;
-        (pane.anchor, pane.cursor) = e.before;
-        self.active = e.side;
-        self.redo.push(e);
+        while let Some(e) = self.undo.pop() {
+            self.apply(e.side, e.start, e.inserted.len(), &e.removed);
+            let pane = &mut self.panes[e.side];
+            pane.depth -= 1;
+            (pane.anchor, pane.cursor) = e.before;
+            self.active = e.side;
+            let joined = e.joined;
+            self.redo.push(e);
+            if !joined {
+                break;
+            }
+        }
         self.after_history_step();
     }
 
     fn redo(&mut self) {
-        let Some(e) = self.redo.pop() else { return };
-        self.apply(e.side, e.start, e.removed.len(), &e.inserted);
-        let pane = &mut self.panes[e.side];
-        pane.depth += 1;
-        pane.cursor = e.after;
-        pane.anchor = e.after;
-        self.active = e.side;
-        self.undo.push(e);
+        let mut first = true;
+        while let Some(e) = self.redo.pop_if(|e| first || e.joined) {
+            first = false;
+            self.apply(e.side, e.start, e.removed.len(), &e.inserted);
+            let pane = &mut self.panes[e.side];
+            pane.depth += 1;
+            pane.cursor = e.after;
+            pane.anchor = e.after;
+            self.active = e.side;
+            self.undo.push(e);
+        }
         self.after_history_step();
+    }
+
+    /// Rewrites both sides as formatted JSON (sorted keys, 4-space indent) as one undo step.
+    fn format_json(&mut self) {
+        let mut formatted = Vec::with_capacity(2);
+        for pane in &self.panes {
+            let file = &pane.file;
+            match json_format::format(&file.lines.join("\n")) {
+                Ok(lines) => formatted.push(lines),
+                Err(e) => {
+                    let name = file.path.file_name().map_or_else(|| file.path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                    self.message = Some((format!("{name} isn't valid JSON: {e}"), true));
+                    return;
+                }
+            }
+        }
+        let mut changed = 0;
+        for (side, lines) in formatted.into_iter().enumerate() {
+            if lines == self.panes[side].file.lines {
+                continue;
+            }
+            let end = self.panes[side].file.lines.len();
+            self.edit(side, 0, end, lines, Pos::default(), EditKind::Other);
+            if changed > 0 {
+                self.undo.last_mut().expect("just pushed").joined = true;
+            }
+            changed += 1;
+        }
+        let undo = if cfg!(target_os = "macos") { "Cmd+Z" } else { "Ctrl+Z" };
+        self.message = Some(if changed == 0 {
+            ("Already formatted.".to_string(), false)
+        } else {
+            (format!("Formatted as JSON ({undo} to undo)."), false)
+        });
+        self.sync_current();
     }
 
     fn after_history_step(&mut self) {
@@ -861,6 +907,17 @@ impl FileCompare {
             if self.options != before {
                 self.rediff();
                 acted = true;
+            }
+            if self.paths().iter().any(|p| json_format::is_json_path(p)) {
+                ui.separator();
+                if ui
+                    .button("Format JSON")
+                    .on_hover_text(format!("Pretty-print both sides with keys sorted (undo with {cmd}+Z)"))
+                    .clicked()
+                {
+                    self.format_json();
+                    acted = true;
+                }
             }
         });
         if acted {
@@ -1489,6 +1546,36 @@ mod tests {
         assert_eq!(v.undo.len(), 1);
         v.undo();
         assert_eq!(lines(&v, 0), ["a", "c"]);
+    }
+
+    #[test]
+    fn format_json_is_one_undo_step() {
+        let mut v = FileCompare::new(file(r#"{"b":1,"a":2}"#), file("{\"a\": 2,\n \"b\": 3}"));
+        v.panes[0].cursor = Pos::new(0, 0);
+        v.insert_text(" ");
+        v.format_json();
+        assert_eq!(lines(&v, 0), ["{", r#"    "a": 2,"#, r#"    "b": 1"#, "}"]);
+        assert_eq!(lines(&v, 1), ["{", r#"    "a": 2,"#, r#"    "b": 3"#, "}"]);
+        assert_eq!(v.model.blocks.len(), 1);
+
+        v.undo();
+        assert_eq!(lines(&v, 0), [r#" {"b":1,"a":2}"#]);
+        assert_eq!(lines(&v, 1), [r#"{"a": 2,"#, r#" "b": 3}"#]);
+        assert!(v.panes[0].modified() && !v.panes[1].modified());
+        v.redo();
+        assert_eq!(lines(&v, 1)[2], r#"    "b": 3"#);
+        v.undo();
+        v.undo();
+        assert!(!v.modified());
+    }
+
+    #[test]
+    fn format_json_leaves_invalid_files_alone() {
+        let mut v = FileCompare::new(file("{\"a\": 1}"), file("{oops"));
+        v.format_json();
+        assert!(v.undo.is_empty());
+        assert_eq!(lines(&v, 0), ["{\"a\": 1}"]);
+        assert!(v.message.as_ref().is_some_and(|(m, err)| *err && m.contains("isn't valid JSON")));
     }
 
     #[test]

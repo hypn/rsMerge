@@ -38,6 +38,8 @@ tests, keep any GUI runs short (`WAYLAND_DISPLAY= ./target/debug/rsmerge …`, s
   typing; the diff re-runs after each edit.
 - `diff.rs`: line diff (interned line ids + Myers; Histogram in `similar` is far too slow),
   aligned rows with filler lines, word-level inline diff.
+- `json_format.rs`: canonical JSON (sorted keys, 4-space indent) for the file view's "Format JSON"
+  button, which rewrites both sides as one joined undo step.
 - `text_file.rs`: load/save keeping encoding, BOM, EOL; missing files open empty and are created
   on save.
 - `image_diff.rs`: pixel diff (no egui) with a tolerance, grouped into regions for Prev/Next.

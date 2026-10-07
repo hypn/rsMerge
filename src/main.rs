@@ -7,6 +7,7 @@ mod folder_scan;
 mod folder_view;
 mod image_compare;
 mod image_diff;
+mod json_format;
 mod open_dialog;
 mod text_file;
 

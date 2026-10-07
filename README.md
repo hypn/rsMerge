@@ -1,11 +1,15 @@
 # rsMerge
 
-Prototype of a WinMerge-style compare tool in Rust ([egui](https://github.com/emilk/egui)).
+A fast, WinMerge-style compare tool for files, folders and images, written in Rust
+([egui](https://github.com/emilk/egui)). Runs on Windows, macOS and Linux.
 
 - **Open screen:** pick two files or folders (browse, type, recent list, or drag and drop).
 - **File compare:** editable side-by-side view with synced scrolling, aligned filler lines,
   word-level highlights, an overview strip, copy difference left/right, undo/redo and save
-  (keeps each file's encoding, BOM and line endings).
+  (keeps each file's encoding, BOM and line endings). JSON files get a **Format JSON** button
+  (sorted keys, 4-space indent) that's a single undo step.
+- **Image compare:** side by side or as a blended overlay with shared zoom and pan, changed
+  pixels highlighted, step through changed regions, adjustable colour tolerance.
 - **Folder compare:** tree or flat list with Show toggles (Identical / Different / Left only /
   Right only, any combination), compare by contents or size & date, exclude patterns
   (`.git, node_modules, *.tmp`). Double-click (or Enter) a file to open it side by side; a file
@@ -56,3 +60,5 @@ cargo build --release --target x86_64-pc-windows-gnu
 - `src/compare.rs` — the side-by-side editor view.
 - `src/diff.rs` — line diff model (aligned rows, difference blocks, word-level changes).
 - `src/text_file.rs` — loading/saving with encoding and line-ending detection.
+- `src/json_format.rs` — canonical JSON formatting for the Format JSON button.
+- `src/image_compare.rs` — the image view; `src/image_diff.rs` — pixel diff and changed regions.

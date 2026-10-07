@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn compares_trees() {
-        let base = std::env::temp_dir().join(format!("winmerge-rs-folder-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("rsmerge-folder-{}", std::process::id()));
         let (l, r) = (base.join("l"), base.join("r"));
         write(&l, "same.txt", "x");
         write(&r, "same.txt", "x");

@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn filters_and_views() {
-        let base = std::env::temp_dir().join(format!("winmerge-rs-view-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("rsmerge-view-{}", std::process::id()));
         let (l, r) = (base.join("l"), base.join("r"));
         write(&l, "a/same.txt", "x");
         write(&r, "a/same.txt", "x");

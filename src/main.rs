@@ -15,7 +15,7 @@ use open_dialog::{OpenDialog, Request};
 use std::path::{Path, PathBuf};
 use text_file::Loaded;
 
-const APP_NAME: &str = "WinMerge-rs";
+const APP_NAME: &str = "rsMerge";
 const STORAGE_KEY: &str = "open_dialog";
 const FOLDER_OPTIONS_KEY: &str = "folder_options";
 
@@ -83,7 +83,7 @@ impl App {
             quitting: false,
         };
 
-        // `winmerge-rs LEFT RIGHT` opens two files straight away (or prefills two folders).
+        // `rsmerge LEFT RIGHT` opens two files straight away (or prefills two folders).
         let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
         if let [left, right] = args.as_slice() {
             app.dialog.set_paths(left, right);

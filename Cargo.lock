@@ -1997,6 +1997,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsmerge"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "eframe",
+ "egui_extras",
+ "encoding_rs",
+ "rfd",
+ "serde",
+ "similar",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3111,19 +3124,6 @@ dependencies = [
  "x11-dl",
  "x11rb",
  "xkbcommon-dl",
-]
-
-[[package]]
-name = "winmerge-rs"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "eframe",
- "egui_extras",
- "encoding_rs",
- "rfd",
- "serde",
- "similar",
 ]
 
 [[package]]

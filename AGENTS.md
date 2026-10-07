@@ -7,7 +7,7 @@ WinMerge-style diff tool in Rust + egui (eframe 0.36). Must build for Linux, Win
 
 ```sh
 cargo build                     # native dev build (on an M-series Mac this is Apple Silicon)
-cargo build --release           # native release: target/release/winmerge-rs
+cargo build --release           # native release: target/release/rsmerge
 cargo test                      # unit tests (all logic is tested here)
 cargo test --release -- --ignored --nocapture   # 200k-line diff timing check
 cargo clippy --all-targets      # keep warning-free
@@ -17,14 +17,14 @@ cargo build --release --target x86_64-pc-windows-gnu   # Windows .exe from Linux
 
 - macOS builds are done natively on the user's Mac (no CI); no extra dependencies needed.
 - If the user has a Windows `.exe` open while rebuilding from WSL, the build fails with
-  "os error 5"; copy the newest `deps/winmerge_rs-*.exe` to `winmerge-rs-new.exe` and tell them.
-- `winmerge-rs LEFT RIGHT` opens two files or two folders directly (handy for testing).
+  "os error 5"; copy the newest `deps/rsmerge-*.exe` to `rsmerge-new.exe` and tell them.
+- `rsmerge LEFT RIGHT` opens two files or two folders directly (handy for testing).
 
 ## GUI testing
 
 On a Mac, just `cargo run`. From WSL, windows show up on the user's desktop and often open
 minimized (off-screen at -32730), and can't be restored from there; there's no Xvfb. Prefer unit
-tests, keep any GUI runs short (`WAYLAND_DISPLAY= ./target/debug/winmerge-rs …`, screenshot with
+tests, keep any GUI runs short (`WAYLAND_DISPLAY= ./target/debug/rsmerge …`, screenshot with
 `import -window`, python-xlib XTEST for input) and ask the user to check visuals.
 
 ## Layout

@@ -1,4 +1,4 @@
-# WinMerge-rs
+# rsMerge
 
 Prototype of a WinMerge-style compare tool in Rust ([egui](https://github.com/emilk/egui)).
 
@@ -11,7 +11,7 @@ Prototype of a WinMerge-style compare tool in Rust ([egui](https://github.com/em
   (`.git, node_modules, *.tmp`). Double-click (or Enter) a file to open it side by side; a file
   that exists on one side only opens against an empty side, and saving creates it.
 
-`winmerge-rs LEFT RIGHT` opens two files or two folders directly.
+`rsmerge LEFT RIGHT` opens two files or two folders directly.
 
 ## Keys
 

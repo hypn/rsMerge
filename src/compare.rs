@@ -1493,7 +1493,7 @@ mod tests {
 
     #[test]
     fn reload_discards_edits() {
-        let dir = std::env::temp_dir().join(format!("winmerge-rs-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rsmerge-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (lp, rp) = (dir.join("l.txt"), dir.join("r.txt"));
         std::fs::write(&lp, "one\n").unwrap();

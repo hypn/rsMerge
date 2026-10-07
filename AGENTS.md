@@ -40,6 +40,9 @@ tests, keep any GUI runs short (`WAYLAND_DISPLAY= ./target/debug/rsmerge …`, s
   aligned rows with filler lines, word-level inline diff.
 - `text_file.rs`: load/save keeping encoding, BOM, EOL; missing files open empty and are created
   on save.
+- `image_diff.rs`: pixel diff (no egui) with a tolerance, grouped into regions for Prev/Next.
+  `image_compare.rs`: read-only image view (side by side or blended overlay, shared zoom/pan).
+  Files with an image extension open here instead of the text view.
 - `folder_scan.rs`: background folder scan/compare (no egui). `folder_view.rs`: tree/flat
   table with Show filters.
 
@@ -51,7 +54,7 @@ tests, keep any GUI runs short (`WAYLAND_DISPLAY= ./target/debug/rsmerge …`, s
 - Some glyphs (e.g. ⇅) aren't in the default fonts; ⏷ ⏵ × 📁 📄 render fine.
 - Colours: left = red (removed), right = green (added), filler = grey. User likes Cobalt2.
 - Out of scope unless asked: syntax highlighting, reports/patches, CLI options, plugins, image
-  compare, 3-way compare.
+  editing/merging, 3-way compare.
 
 ## Likely next
 

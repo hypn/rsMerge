@@ -5,12 +5,15 @@ mod compare;
 mod diff;
 mod folder_scan;
 mod folder_view;
+mod image_compare;
+mod image_diff;
 mod open_dialog;
 mod text_file;
 
 use compare::FileCompare;
 use folder_view::{FolderAction, FolderCompare, FolderOptions};
 use eframe::egui;
+use image_compare::ImageCompare;
 use open_dialog::{OpenDialog, Request};
 use std::path::{Path, PathBuf};
 use text_file::Loaded;
@@ -34,6 +37,7 @@ fn main() -> eframe::Result {
 enum Tab {
     Compare(Box<FileCompare>),
     Folder(Box<FolderCompare>),
+    Image(Box<ImageCompare>),
     Notice { title: String, text: String },
 }
 
@@ -42,6 +46,7 @@ impl Tab {
         match self {
             Tab::Compare(c) => c.title(),
             Tab::Folder(f) => f.title(),
+            Tab::Image(c) => c.title(),
             Tab::Notice { title, .. } => title.clone(),
         }
     }
@@ -100,9 +105,18 @@ impl App {
     /// route into the file view (the Open screen now, folder compare later).
     pub fn open_file_compare(&mut self, left: &Path, right: &Path) {
         // Reuse a tab that already compares these two files.
-        let existing = self.tabs.iter().position(|t| matches!(t, Tab::Compare(c) if c.paths() == [left, right]));
+        let existing = self.tabs.iter().position(|t| match t {
+            Tab::Compare(c) => c.paths() == [left, right],
+            Tab::Image(c) => c.paths() == [left, right],
+            Tab::Folder(_) | Tab::Notice { .. } => false,
+        });
         if let Some(i) = existing {
             self.active = Some(i);
+            return;
+        }
+        if image_diff::is_image_path(left) || image_diff::is_image_path(right) {
+            self.tabs.push(Tab::Image(Box::new(ImageCompare::new(left, right))));
+            self.active = Some(self.tabs.len() - 1);
             return;
         }
         // A side that doesn't exist (a file only in one folder) opens empty; saving creates it.
@@ -190,14 +204,14 @@ impl App {
         let message = match confirm {
             Confirm::CloseTab(i) => match &self.tabs[i] {
                 Tab::Compare(c) => format!("Save changes to {}?", c.modified_names().join(" and ")),
-                Tab::Folder(_) | Tab::Notice { .. } => String::new(),
+                Tab::Folder(_) | Tab::Image(_) | Tab::Notice { .. } => String::new(),
             },
             Confirm::Refresh(i) => match &self.tabs[i] {
                 Tab::Compare(c) => format!(
                     "Refreshing reloads both files from disk. Save changes to {} first?",
                     c.modified_names().join(" and ")
                 ),
-                Tab::Folder(_) | Tab::Notice { .. } => String::new(),
+                Tab::Folder(_) | Tab::Image(_) | Tab::Notice { .. } => String::new(),
             },
             Confirm::Quit => "Some comparisons have unsaved changes. Save them before quitting?".to_string(),
         };
@@ -227,7 +241,7 @@ impl App {
                 let saved = !save
                     || match &mut self.tabs[i] {
                         Tab::Compare(c) => c.save(),
-                        Tab::Folder(_) | Tab::Notice { .. } => true,
+                        Tab::Folder(_) | Tab::Image(_) | Tab::Notice { .. } => true,
                     };
                 if saved {
                     self.close_tab(i);
@@ -312,6 +326,12 @@ impl eframe::App for App {
                         open_files = Some((left, right));
                     }
                     self.folder_options = view.options.clone();
+                }
+                Tab::Image(view) => {
+                    if ui.input(|i| i.key_pressed(egui::Key::F5)) {
+                        view.request_refresh();
+                    }
+                    view.ui(ui);
                 }
                 Tab::Notice { text, .. } => {
                     ui.add_space(8.0);

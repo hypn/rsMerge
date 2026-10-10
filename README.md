@@ -1,5 +1,7 @@
 # rsMerge
 
+![rsMerge](assets/rsMerge.png)
+
 A fast, WinMerge-style compare tool for files, folders and images, written in Rust
 ([egui](https://github.com/emilk/egui)). Runs on Windows, macOS and Linux.
 

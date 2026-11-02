@@ -40,6 +40,8 @@ tests, keep any GUI runs short (`WAYLAND_DISPLAY= ./target/debug/rsmerge …`, s
   aligned rows with filler lines, word-level inline diff.
 - `json_format.rs`: canonical JSON (sorted keys, 4-space indent) for the file view's "Format JSON"
   button, which rewrites both sides as one joined undo step.
+  It also finds foldable objects/arrays (`folds`), keyed by property path so a fold applies to both
+  sides; folding in `compare.rs` is view-only (`shown`/`hidden`), the diff still runs on all lines.
 - `text_file.rs`: load/save keeping encoding, BOM, EOL; missing files open empty and are created
   on save.
 - `image_diff.rs`: pixel diff (no egui) with a tolerance, grouped into regions for Prev/Next.

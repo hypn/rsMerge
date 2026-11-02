@@ -307,7 +307,7 @@ impl eframe::App for App {
             }
             Some(i) => match &mut self.tabs[i] {
                 Tab::Compare(view) => {
-                    if ui.input(|i| i.key_pressed(egui::Key::F5)) {
+                    if refresh_pressed(ui) {
                         view.request_refresh();
                     }
                     view.ui(ui);
@@ -320,7 +320,7 @@ impl eframe::App for App {
                     }
                 }
                 Tab::Folder(view) => {
-                    if ui.input(|i| i.key_pressed(egui::Key::F5)) {
+                    if refresh_pressed(ui) {
                         view.rescan();
                     }
                     if let Some(FolderAction::Open(left, right)) = view.ui(ui) {
@@ -329,7 +329,7 @@ impl eframe::App for App {
                     self.folder_options = view.options.clone();
                 }
                 Tab::Image(view) => {
-                    if ui.input(|i| i.key_pressed(egui::Key::F5)) {
+                    if refresh_pressed(ui) {
                         view.request_refresh();
                     }
                     view.ui(ui);
@@ -351,4 +351,9 @@ impl eframe::App for App {
         eframe::set_value(storage, STORAGE_KEY, self.dialog.state());
         eframe::set_value(storage, FOLDER_OPTIONS_KEY, &self.folder_options);
     }
+}
+
+/// F5, or Ctrl+R (Cmd+R on macOS).
+fn refresh_pressed(ui: &egui::Ui) -> bool {
+    ui.input(|i| i.key_pressed(egui::Key::F5) || (i.modifiers.command && i.key_pressed(egui::Key::R)))
 }

@@ -6,13 +6,13 @@
 //! each edit.
 
 use crate::diff::{DiffModel, DiffOptions, inline_diff};
-use crate::json_format;
+use crate::json_format::{self, Fold};
 use crate::text_file::{self, Loaded, TextFile};
 use eframe::egui::{
     self, Color32, CursorIcon, Event, FontId, Galley, Id, Key, Modifiers, Pos2, Rect, Sense, Stroke, Ui, Vec2,
     pos2, text::CCursor, text::LayoutJob, text::TextFormat, vec2,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -24,6 +24,8 @@ const HEADER_H: f32 = 22.0;
 const STATUS_H: f32 = 20.0;
 const PANE_GAP: f32 = 4.0;
 const TEXT_PAD: f32 = 4.0;
+/// Gutter space for the collapse/expand marker, when the files have foldable JSON.
+const FOLD_W: f32 = 14.0;
 
 const SIDE_NAMES: [&str; 2] = ["Left", "Right"];
 
@@ -185,6 +187,18 @@ pub struct FileCompare {
     message: Option<(String, bool)>,
     /// Set by the Refresh button; the app decides whether to ask about unsaved changes.
     refresh_requested: bool,
+    /// JSON paths currently collapsed. Shared by both sides, so a fold applies wherever that
+    /// property is foldable, whatever its type on each side.
+    collapsed: HashSet<String>,
+    folds: [Vec<Fold>; 2],
+    /// `hidden[side][line]`: the line is inside a collapsed fold.
+    hidden: [Vec<bool>; 2],
+    /// Model rows that are displayed, in order. A row is hidden when all its lines are.
+    shown: Vec<usize>,
+    /// Display index of each model row (a hidden row maps to the row before it).
+    display_of: Vec<usize>,
+    /// Display rows followed by hidden rows that contain differences.
+    folded_diff: HashSet<usize>,
 }
 
 impl FileCompare {
@@ -207,6 +221,12 @@ impl FileCompare {
             visible_rows: 30,
             message: None,
             refresh_requested: false,
+            collapsed: HashSet::new(),
+            folds: [Vec::new(), Vec::new()],
+            hidden: [Vec::new(), Vec::new()],
+            shown: Vec::new(),
+            display_of: Vec::new(),
+            folded_diff: HashSet::new(),
         };
         view.rediff();
         if !view.model.blocks.is_empty() {
@@ -260,7 +280,7 @@ impl FileCompare {
         true
     }
 
-    /// Asks for a reload (F5 is handled by the app so it works wherever focus is).
+    /// Asks for a reload (F5/Ctrl+R are handled by the app so it works wherever focus is).
     pub fn request_refresh(&mut self) {
         self.refresh_requested = true;
     }
@@ -320,7 +340,155 @@ impl FileCompare {
             .map(|l| display_width(l))
             .max()
             .unwrap_or(0);
+        for (pane, folds) in self.panes.iter().zip(&mut self.folds) {
+            *folds = if json_format::is_json_path(&pane.file.path) { json_format::folds(&pane.file.lines) } else { Vec::new() };
+        }
+        self.rebuild_view();
+    }
+
+    // ----- Folding -----
+
+    fn is_hidden(&self, side: usize, line: usize) -> bool {
+        self.hidden[side].get(line).copied().unwrap_or(false)
+    }
+
+    fn has_folds(&self) -> bool {
+        self.folds.iter().any(|f| !f.is_empty())
+    }
+
+    fn fold_at(&self, side: usize, line: usize) -> Option<&Fold> {
+        let folds = &self.folds[side];
+        folds.binary_search_by_key(&line, |f| f.start).ok().map(|i| &folds[i])
+    }
+
+    /// Works out which lines and rows are hidden, and moves cursors out of hidden lines.
+    fn rebuild_view(&mut self) {
+        for side in 0..2 {
+            let mut hidden = vec![false; self.panes[side].file.lines.len()];
+            let mut skip_to = 0;
+            for f in &self.folds[side] {
+                if f.start >= skip_to && self.collapsed.contains(&f.path) {
+                    hidden[f.start + 1..=f.end].fill(true);
+                    skip_to = f.end + 1;
+                }
+            }
+            self.hidden[side] = hidden;
+        }
+        self.shown.clear();
+        self.display_of.clear();
+        self.folded_diff.clear();
+        for (i, r) in self.model.rows.iter().enumerate() {
+            let hide = (0..2).all(|s| r.lines[s].is_none_or(|l| self.hidden[s][l]));
+            match self.shown.len().checked_sub(1) {
+                Some(last) if hide => {
+                    self.display_of.push(last);
+                    if r.block.is_some() {
+                        self.folded_diff.insert(last);
+                    }
+                }
+                _ if hide => self.display_of.push(0),
+                _ => {
+                    self.display_of.push(self.shown.len());
+                    self.shown.push(i);
+                }
+            }
+        }
+        for side in 0..2 {
+            let pane = &mut self.panes[side];
+            pane.cursor = Self::unhidden(&self.hidden[side], pane, pane.cursor);
+            pane.anchor = Self::unhidden(&self.hidden[side], pane, pane.anchor);
+        }
         self.sync_current();
+    }
+
+    /// A position inside a collapsed fold moves to the fold's first line.
+    fn unhidden(hidden: &[bool], pane: &Pane, mut p: Pos) -> Pos {
+        if !hidden.get(p.line).copied().unwrap_or(false) {
+            return p;
+        }
+        while p.line > 0 && hidden.get(p.line).copied().unwrap_or(false) {
+            p.line -= 1;
+        }
+        pane.clamp(Pos::new(p.line, p.col))
+    }
+
+    /// Display index of a model row.
+    fn display_row(&self, row: usize) -> usize {
+        self.display_of.get(row).copied().unwrap_or(0)
+    }
+
+    /// Steps `delta` displayed lines on a side, skipping lines hidden by a collapsed fold.
+    fn shift_line(&self, side: usize, mut line: usize, delta: isize) -> usize {
+        let last = self.panes[side].last_line();
+        for _ in 0..delta.unsigned_abs() {
+            let mut next = line;
+            let found = loop {
+                next = if delta > 0 {
+                    next + 1
+                } else {
+                    match next.checked_sub(1) {
+                        Some(n) => n,
+                        None => break false,
+                    }
+                };
+                if next > last {
+                    break false;
+                }
+                if !self.is_hidden(side, next) {
+                    break true;
+                }
+            };
+            if !found {
+                break;
+            }
+            line = next;
+        }
+        line
+    }
+
+    fn toggle_fold(&mut self, side: usize, line: usize) {
+        let Some(path) = self.fold_at(side, line).map(|f| f.path.clone()) else { return };
+        if !self.collapsed.remove(&path) {
+            self.collapsed.insert(path);
+        }
+        self.fold_changed();
+    }
+
+    fn collapse_all(&mut self) {
+        let paths = self.folds.iter().flatten().filter(|f| !f.path.is_empty()).map(|f| f.path.clone());
+        self.collapsed.extend(paths);
+        self.fold_changed();
+    }
+
+    fn expand_all(&mut self) {
+        self.collapsed.clear();
+        self.fold_changed();
+    }
+
+    /// Expands every collapsed fold hiding any of a difference's lines.
+    fn expand_block(&mut self, block: usize) {
+        let mut changed = false;
+        for side in 0..2 {
+            let lines = self.model.blocks[block].lines[side].clone();
+            if lines.is_empty() {
+                continue;
+            }
+            for f in &self.folds[side] {
+                if f.start + 1 < lines.end && lines.start <= f.end {
+                    changed |= self.collapsed.remove(&f.path);
+                }
+            }
+        }
+        if changed {
+            self.fold_changed();
+        }
+    }
+
+    fn fold_changed(&mut self) {
+        for pane in &mut self.panes {
+            pane.filler = None;
+        }
+        self.rebuild_view();
     }
 
     fn cursor_row(&self, side: usize) -> usize {
@@ -359,6 +527,7 @@ impl FileCompare {
     }
 
     fn select_diff(&mut self, index: usize) {
+        self.expand_block(index);
         let rows = self.model.blocks[index].rows.clone();
         for side in 0..2 {
             let pos = self.pos_for_row(side, rows.start, 0);
@@ -637,7 +806,7 @@ impl FileCompare {
     fn move_to(&mut self, p: Pos, extend: bool) {
         let pane = &mut self.panes[self.active];
         pane.filler = None;
-        pane.cursor = pane.clamp(p);
+        pane.cursor = Self::unhidden(&self.hidden[self.active], pane, pane.clamp(p));
         if !extend {
             pane.anchor = pane.cursor;
         }
@@ -646,9 +815,10 @@ impl FileCompare {
     }
 
     fn move_vertical(&mut self, delta: isize, extend: bool) {
-        let pane = &mut self.panes[self.active];
+        let side = self.active;
+        let pane = &mut self.panes[side];
         let want = *pane.want_col.get_or_insert(pane.cursor.col);
-        let line = pane.cursor.line.saturating_add_signed(delta).min(pane.last_line());
+        let line = self.shift_line(side, self.panes[side].cursor.line, delta);
         self.move_to(Pos::new(line, want), extend);
         self.panes[self.active].want_col = Some(want);
     }
@@ -662,14 +832,16 @@ impl FileCompare {
         let c = pane.cursor;
         let target = if forward {
             if c.col >= pane.line_len(c.line) {
-                if c.line < pane.last_line() { Pos::new(c.line + 1, 0) } else { c }
+                let next = self.shift_line(self.active, c.line, 1);
+                if next != c.line { Pos::new(next, 0) } else { c }
             } else if word {
                 Pos::new(c.line, word_boundary(pane.line(c.line), c.col, true))
             } else {
                 Pos::new(c.line, c.col + 1)
             }
         } else if c.col == 0 {
-            if c.line > 0 { Pos::new(c.line - 1, pane.line_len(c.line - 1)) } else { c }
+            let prev = self.shift_line(self.active, c.line, -1);
+            if prev != c.line { Pos::new(prev, pane.line_len(prev)) } else { c }
         } else if word {
             Pos::new(c.line, word_boundary(pane.line(c.line), c.col, false))
         } else {
@@ -798,7 +970,8 @@ impl FileCompare {
         let (row_h, char_w) = ui.ctx().fonts_mut(|f| (f.row_height(&font).ceil() + 2.0, f.glyph_width(&font, 'M')));
         let max_lines = self.panes.iter().map(|p| p.file.lines.len()).max().unwrap_or(0).max(1);
         let digits = max_lines.to_string().len() as f32;
-        let metrics = Metrics { font, row_h, char_w, gutter_w: digits * char_w + 14.0 };
+        let fold_w = if self.has_folds() { FOLD_W } else { 0.0 };
+        let metrics = Metrics { font, row_h, char_w, gutter_w: digits * char_w + 14.0 + fold_w };
 
         let header_bottom = body.top() + HEADER_H;
         let loc = Rect::from_min_max(pos2(body.left(), header_bottom), pos2(body.left() + LOCATION_W, body.bottom() - SCROLLBAR_W));
@@ -813,7 +986,7 @@ impl FileCompare {
 
         let view_h = pane_rects[0].height();
         let text_w = pane_w - metrics.gutter_w - TEXT_PAD;
-        let content_h = self.model.rows.len() as f32 * row_h;
+        let content_h = self.shown.len() as f32 * row_h;
         let content_w = (self.widest + 4) as f32 * char_w;
         self.visible_rows = (view_h / row_h).floor().max(1.0) as usize;
 
@@ -822,7 +995,7 @@ impl FileCompare {
             self.scroll -= ui.input(|i| i.smooth_scroll_delta);
         }
         if let Some(row) = self.center_row.take() {
-            self.scroll.y = row as f32 * row_h - view_h / 3.0;
+            self.scroll.y = self.display_row(row) as f32 * row_h - view_h / 3.0;
             self.reveal_cursor = false;
         }
         if std::mem::take(&mut self.reveal_cursor) {
@@ -897,7 +1070,7 @@ impl FileCompare {
                 self.save();
                 acted = true;
             }
-            if ui.button("Refresh").on_hover_text("Reload both files from disk (F5)").clicked() {
+            if ui.button("Refresh").on_hover_text(format!("Reload both files from disk (F5 or {cmd}+R)")).clicked() {
                 self.refresh_requested = true;
             }
             ui.separator();
@@ -918,6 +1091,14 @@ impl FileCompare {
                     self.format_json();
                     acted = true;
                 }
+                if ui.add_enabled(self.has_folds(), egui::Button::new("Collapse all")).on_hover_text("Collapse every object and array on both sides").clicked() {
+                    self.collapse_all();
+                    acted = true;
+                }
+                if ui.add_enabled(!self.collapsed.is_empty(), egui::Button::new("Expand all")).clicked() {
+                    self.expand_all();
+                    acted = true;
+                }
             }
         });
         if acted {
@@ -926,7 +1107,7 @@ impl FileCompare {
     }
 
     fn reveal(&mut self, m: &Metrics, view_h: f32, text_w: f32) {
-        let row = self.cursor_row(self.active) as f32;
+        let row = self.display_row(self.cursor_row(self.active)) as f32;
         let top = row * m.row_h;
         if top < self.scroll.y {
             self.scroll.y = top;
@@ -950,8 +1131,8 @@ impl FileCompare {
     }
 
     fn row_at(&self, rect: Rect, y: f32, row_h: f32) -> usize {
-        let row = ((y - rect.top() + self.scroll.y) / row_h).floor().max(0.0) as usize;
-        row.min(self.model.rows.len().saturating_sub(1))
+        let display = ((y - rect.top() + self.scroll.y) / row_h).floor().max(0.0) as usize;
+        self.shown.get(display.min(self.shown.len().saturating_sub(1))).copied().unwrap_or(0)
     }
 
     fn pos_at(&self, ui: &Ui, side: usize, rect: Rect, p: Pos2, m: &Metrics) -> Pos {
@@ -991,6 +1172,20 @@ impl FileCompare {
             self.sync_current();
         }
         response.context_menu(|ui| self.context_menu(ui));
+
+        // The fold marker in the gutter toggles on click; pressing it doesn't move the caret.
+        if (response.clicked() || response.is_pointer_button_down_on())
+            && let Some(pointer) = ui.input(|i| i.pointer.interact_pos())
+            && pointer.x < rect.left() + FOLD_W
+            && let Some(line) = self.model.rows.get(self.row_at(rect, pointer.y, m.row_h)).and_then(|r| r.lines[side])
+            && self.fold_at(side, line).is_some()
+        {
+            if response.clicked() {
+                self.toggle_fold(side, line);
+                self.focus(ui.ctx());
+            }
+            return;
+        }
 
         // A quick tap can press and release within one frame, so a click counts as a press too.
         let pressed =
@@ -1066,8 +1261,9 @@ impl FileCompare {
 
     fn compute_visible_inline(&mut self, view_h: f32, row_h: f32) {
         let first = (self.scroll.y / row_h).floor() as usize;
-        let last = (((self.scroll.y + view_h) / row_h).ceil() as usize + 1).min(self.model.rows.len());
-        for row in first..last {
+        let last = (((self.scroll.y + view_h) / row_h).ceil() as usize + 1).min(self.shown.len());
+        for display in first..last {
+            let row = self.shown[display];
             let r = self.model.rows[row];
             if let (Some(_), [Some(l), Some(rr)]) = (r.block, r.lines) {
                 self.inline
@@ -1119,14 +1315,15 @@ impl FileCompare {
         let show_caret = focused && side == self.active;
         let caret_row = self.cursor_row(side);
         let first = (self.scroll.y / m.row_h).floor() as usize;
-        let last = (((self.scroll.y + rect.height()) / m.row_h).ceil() as usize + 1).min(self.model.rows.len());
+        let last = (((self.scroll.y + rect.height()) / m.row_h).ceil() as usize + 1).min(self.shown.len());
 
-        for row in first..last {
+        for display in first..last {
+            let row = self.shown[display];
             let r = self.model.rows[row];
-            let y = rect.top() + row as f32 * m.row_h - self.scroll.y;
+            let y = rect.top() + display as f32 * m.row_h - self.scroll.y;
             let row_rect = Rect::from_min_max(pos2(gutter.right(), y), pos2(rect.right(), y + m.row_h));
             let current = r.block.is_some() && r.block == self.current;
-            if r.block.is_some() {
+            if r.block.is_some() || self.folded_diff.contains(&display) {
                 let fill = match (r.lines[side].is_some(), current) {
                     (true, false) => colors.diff[side],
                     (true, true) => colors.diff_current[side],
@@ -1144,6 +1341,17 @@ impl FileCompare {
                 m.font.clone(),
                 visuals.weak_text_color(),
             );
+            let fold = self.fold_at(side, line);
+            if let Some(f) = fold {
+                let marker = if self.collapsed.contains(&f.path) { "⏵" } else { "⏷" };
+                painter.text(
+                    pos2(gutter.left() + FOLD_W / 2.0, y + m.row_h / 2.0),
+                    egui::Align2::CENTER_CENTER,
+                    marker,
+                    m.font.clone(),
+                    visuals.weak_text_color(),
+                );
+            }
 
             let text = pane.line(line);
             let (display, map) = expand_tabs(text);
@@ -1172,6 +1380,11 @@ impl FileCompare {
                 );
             }
             text_painter.galley(origin, galley.clone(), visuals.text_color());
+            if let Some(f) = fold.filter(|f| self.collapsed.contains(&f.path)) {
+                let tail = format!("… {}", pane.line(f.end).trim());
+                let pos = pos2(origin.x + galley.size().x + m.char_w, y + m.row_h / 2.0);
+                text_painter.text(pos, egui::Align2::LEFT_CENTER, tail, m.font.clone(), visuals.weak_text_color());
+            }
 
             if show_caret && row == caret_row && line == pane.cursor.line {
                 let x = origin.x + x_of(&galley, &map, pane.cursor.col);
@@ -1181,7 +1394,7 @@ impl FileCompare {
 
         // Caret on a filler row or in an empty file.
         if show_caret && self.model.rows.get(caret_row).is_none_or(|r| r.lines[side] != Some(pane.cursor.line)) {
-            let y = rect.top() + caret_row as f32 * m.row_h - self.scroll.y;
+            let y = rect.top() + self.display_row(caret_row) as f32 * m.row_h - self.scroll.y;
             self.paint_caret(ui, &text_painter, rect, text_left - self.scroll.x, y, m.row_h);
         }
     }
@@ -1203,7 +1416,7 @@ impl FileCompare {
     fn location_strip(&mut self, ui: &mut Ui, rect: Rect, row_h: f32, view_h: f32) {
         let colors = Colors::new(ui.visuals().dark_mode);
         let response = ui.interact(rect, self.id.with("location"), Sense::click_and_drag());
-        let total = self.model.rows.len().max(1) as f32;
+        let total = self.shown.len().max(1) as f32;
         let scale = rect.height() / total;
         if (response.clicked() || response.dragged())
             && let Some(p) = response.interact_pointer_pos()
@@ -1216,8 +1429,9 @@ impl FileCompare {
         painter.rect_filled(rect, 2.0, ui.visuals().faint_bg_color);
         let half = (rect.width() - 4.0) / 2.0;
         for (i, block) in self.model.blocks.iter().enumerate() {
-            let y0 = rect.top() + block.rows.start as f32 * scale;
-            let y1 = (rect.top() + block.rows.end as f32 * scale).max(y0 + 2.0);
+            let (first, last) = (self.display_row(block.rows.start), self.display_row(block.rows.end - 1));
+            let y0 = rect.top() + first as f32 * scale;
+            let y1 = (rect.top() + (last + 1) as f32 * scale).max(y0 + 2.0);
             let current = self.current == Some(i);
             for side in 0..2 {
                 let x0 = rect.left() + 1.0 + side as f32 * (half + 2.0);
@@ -1476,6 +1690,10 @@ mod tests {
         }
     }
 
+    fn json_file(text: &str) -> TextFile {
+        TextFile { path: "test.json".into(), ..file(text) }
+    }
+
     fn lines(view: &FileCompare, side: usize) -> Vec<&str> {
         view.panes[side].file.lines.iter().map(String::as_str).collect()
     }
@@ -1576,6 +1794,66 @@ mod tests {
         assert!(v.undo.is_empty());
         assert_eq!(lines(&v, 0), ["{\"a\": 1}"]);
         assert!(v.message.as_ref().is_some_and(|(m, err)| *err && m.contains("isn't valid JSON")));
+    }
+
+    /// Left holds `a` as an object, right as an array with an extra element; `c` differs inside.
+    fn folding_view() -> FileCompare {
+        let left = "{\n  \"a\": {\n    \"x\": 1,\n    \"y\": 2\n  },\n  \"b\": 1,\n  \"c\": {\n    \"z\": 1\n  }\n}";
+        let right = "{\n  \"a\": [\n    1,\n    2,\n    3\n  ],\n  \"b\": 1,\n  \"c\": {\n    \"z\": 2\n  }\n}";
+        FileCompare::new(json_file(left), json_file(right))
+    }
+
+    fn shown_lines(v: &FileCompare, side: usize) -> Vec<usize> {
+        v.shown.iter().filter_map(|&r| v.model.rows[r].lines[side]).collect()
+    }
+
+    #[test]
+    fn collapsing_a_property_folds_both_sides_whatever_the_type() {
+        let mut v = folding_view();
+        assert_eq!(v.shown.len(), v.model.rows.len());
+        v.toggle_fold(0, 1);
+        assert!(v.shown.len() < v.model.rows.len());
+        // Header and the trailing `},` / `],` are folded away on each side.
+        assert_eq!(shown_lines(&v, 0), [0, 1, 5, 6, 7, 8, 9]);
+        assert_eq!(shown_lines(&v, 1), [0, 1, 6, 7, 8, 9, 10]);
+        // The folded rows differ, so the header row stays marked as changed.
+        assert!(!v.folded_diff.is_empty());
+        v.toggle_fold(1, 1);
+        assert_eq!(v.shown.len(), v.model.rows.len());
+    }
+
+    #[test]
+    fn collapse_all_expand_all_and_next_diff_reveals() {
+        let mut v = folding_view();
+        v.collapse_all();
+        assert_eq!(shown_lines(&v, 0), [0, 1, 5, 6, 9]);
+        v.expand_all();
+        assert_eq!(v.shown.len(), v.model.rows.len());
+
+        v.collapse_all();
+        // Selecting the difference inside `c` opens only the folds hiding it.
+        v.select_diff(v.model.blocks.len() - 1);
+        assert!(v.collapsed.contains("\0a") && !v.collapsed.contains("\0c"));
+        assert!(shown_lines(&v, 0).contains(&7));
+    }
+
+    #[test]
+    fn cursor_skips_and_leaves_collapsed_lines() {
+        let mut v = folding_view();
+        v.toggle_fold(0, 1);
+        v.active = 0;
+        v.move_to(Pos::new(1, 3), false);
+        v.move_vertical(1, false);
+        assert_eq!(v.panes[0].cursor.line, 5);
+        v.move_vertical(-1, false);
+        assert_eq!(v.panes[0].cursor.line, 1);
+        v.move_to(Pos::new(3, 2), false);
+        assert_eq!(v.panes[0].cursor.line, 1);
+        // Collapsing under the cursor pulls it up to the header.
+        v.expand_all();
+        v.move_to(Pos::new(3, 2), false);
+        v.toggle_fold(0, 1);
+        assert_eq!(v.panes[0].cursor.line, 1);
     }
 
     #[test]

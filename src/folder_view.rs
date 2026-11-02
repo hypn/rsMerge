@@ -254,7 +254,7 @@ impl FolderCompare {
         let mut filters_changed = false;
         let mut rescan = false;
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Refresh").on_hover_text("Compare again (F5)").clicked() {
+            if ui.button("Refresh").on_hover_text(format!("Compare again (F5 or {}+R)", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" })).clicked() {
                 rescan = true;
             }
             ui.separator();

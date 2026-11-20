@@ -6,10 +6,14 @@ A fast, WinMerge-style compare tool for files, folders and images, written in Ru
 ([egui](https://github.com/emilk/egui)). Runs on Windows, macOS and Linux.
 
 - **Open screen:** pick two files or folders (browse, type, recent list, or drag and drop).
+  Open screens are tabs, so several comparisons can be set up at once (**+** adds one);
+  dropping files onto a comparison in progress starts a new Open tab instead of replacing it.
+  Dropping single files alternates between the left and right path.
 - **File compare:** editable side-by-side view with synced scrolling, aligned filler lines,
   word-level highlights, an overview strip, copy difference left/right, undo/redo and save
   (keeps each file's encoding, BOM and line endings). JSON files get a **Format JSON** button
-  (sorted keys, 4-space indent) that's a single undo step.
+  (sorted keys, 4-space indent) that's a single undo step. JSON objects and arrays can be
+  folded; other text folds by indentation, but only where both sides are identical.
 - **Image compare:** side by side or as a blended overlay with shared zoom and pan, changed
   pixels highlighted, step through changed regions, adjustable colour tolerance.
 - **Folder compare:** tree or flat list with Show toggles (Identical / Different / Left only /
@@ -57,10 +61,10 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 - `src/main.rs` — app shell: tabs, unsaved-changes prompts. `App::open_file_compare` is the
   one entry point into the file view.
-- `src/open_dialog.rs` — the Open screen.
+- `src/open_dialog.rs` — the Open screen (one per Open tab).
 - `src/folder_view.rs` — the folder comparison view; `src/folder_scan.rs` — scanning and comparing.
 - `src/compare.rs` — the side-by-side editor view.
 - `src/diff.rs` — line diff model (aligned rows, difference blocks, word-level changes).
 - `src/text_file.rs` — loading/saving with encoding and line-ending detection.
-- `src/json_format.rs` — canonical JSON formatting for the Format JSON button.
+- `src/json_format.rs` — canonical JSON formatting for the Format JSON button, plus JSON and indentation folds.
 - `src/image_compare.rs` — the image view; `src/image_diff.rs` — pixel diff and changed regions.

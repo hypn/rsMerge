@@ -15,7 +15,7 @@ use compare::FileCompare;
 use folder_view::{FolderAction, FolderCompare, FolderOptions};
 use eframe::egui;
 use image_compare::ImageCompare;
-use open_dialog::{OpenDialog, Request};
+use open_dialog::{OpenDialog, Persisted, Request};
 use std::path::{Path, PathBuf};
 use text_file::Loaded;
 
@@ -36,6 +36,7 @@ fn main() -> eframe::Result {
 }
 
 enum Tab {
+    Open(Box<OpenDialog>),
     Compare(Box<FileCompare>),
     Folder(Box<FolderCompare>),
     Image(Box<ImageCompare>),
@@ -45,6 +46,7 @@ enum Tab {
 impl Tab {
     fn title(&self) -> String {
         match self {
+            Tab::Open(_) => "Open…".into(),
             Tab::Compare(c) => c.title(),
             Tab::Folder(f) => f.title(),
             Tab::Image(c) => c.title(),
@@ -66,25 +68,26 @@ enum Confirm {
 }
 
 struct App {
-    dialog: OpenDialog,
+    /// Last submitted Open screen state: seeds new Open tabs and is saved between runs.
+    template: Persisted,
     /// Options for new folder comparisons (follows the last one changed).
     folder_options: FolderOptions,
     tabs: Vec<Tab>,
-    /// Index into `tabs`, or `None` for the Open screen.
-    active: Option<usize>,
+    /// Index into `tabs`; there is always at least one tab.
+    active: usize,
     confirm: Option<Confirm>,
     quitting: bool,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let state = cc.storage.and_then(|s| eframe::get_value(s, STORAGE_KEY)).unwrap_or_default();
+        let state: Persisted = cc.storage.and_then(|s| eframe::get_value(s, STORAGE_KEY)).unwrap_or_default();
         let folder_options = cc.storage.and_then(|s| eframe::get_value(s, FOLDER_OPTIONS_KEY)).unwrap_or_default();
         let mut app = Self {
-            dialog: OpenDialog::new(state),
+            tabs: vec![Tab::Open(Box::new(OpenDialog::new(state.clone())))],
+            template: state,
             folder_options,
-            tabs: Vec::new(),
-            active: None,
+            active: 0,
             confirm: None,
             quitting: false,
         };
@@ -92,7 +95,9 @@ impl App {
         // `rsmerge LEFT RIGHT` opens two files straight away (or prefills two folders).
         let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
         if let [left, right] = args.as_slice() {
-            app.dialog.set_paths(left, right);
+            if let Tab::Open(d) = &mut app.tabs[0] {
+                d.set_paths(left, right);
+            }
             if left.is_file() && right.is_file() {
                 app.open_file_compare(left, right);
             } else if left.is_dir() && right.is_dir() {
@@ -109,15 +114,15 @@ impl App {
         let existing = self.tabs.iter().position(|t| match t {
             Tab::Compare(c) => c.paths() == [left, right],
             Tab::Image(c) => c.paths() == [left, right],
-            Tab::Folder(_) | Tab::Notice { .. } => false,
+            Tab::Folder(_) | Tab::Notice { .. } | Tab::Open(_) => false,
         });
         if let Some(i) = existing {
-            self.active = Some(i);
+            self.active = i;
             return;
         }
         if image_diff::is_image_path(left) || image_diff::is_image_path(right) {
             self.tabs.push(Tab::Image(Box::new(ImageCompare::new(left, right))));
-            self.active = Some(self.tabs.len() - 1);
+            self.active = self.tabs.len() - 1;
             return;
         }
         // A side that doesn't exist (a file only in one folder) opens empty; saving creates it.
@@ -138,7 +143,7 @@ impl App {
             (Err(e), _) | (_, Err(e)) => Tab::Notice { title: "Error".into(), text: format!("Couldn't open files: {e}") },
         };
         self.tabs.push(tab);
-        self.active = Some(self.tabs.len() - 1);
+        self.active = self.tabs.len() - 1;
     }
 
     fn handle_request(&mut self, request: Request) {
@@ -153,21 +158,30 @@ impl App {
     fn open_folder_compare(&mut self, left: PathBuf, right: PathBuf, recursive: bool) {
         let view = FolderCompare::new(left, right, recursive, self.folder_options.clone());
         self.tabs.push(Tab::Folder(Box::new(view)));
-        self.active = Some(self.tabs.len() - 1);
+        self.active = self.tabs.len() - 1;
     }
 
     fn close_tab(&mut self, index: usize) {
         self.tabs.remove(index);
-        self.active = match self.active {
-            Some(a) if a > index => Some(a - 1),
-            Some(a) if a == index => index.checked_sub(1).or((!self.tabs.is_empty()).then_some(0)),
-            other => other,
-        };
+        if self.tabs.is_empty() {
+            self.tabs.push(Tab::Open(Box::new(OpenDialog::from_template(&self.template))));
+        }
+        if self.active > index || (self.active == index && index > 0) {
+            self.active -= 1;
+        }
+    }
+
+    /// New Open tab, optionally prefilled from dropped paths.
+    fn open_new_tab(&mut self, dropped: &[PathBuf]) {
+        let mut dialog = OpenDialog::from_template(&self.template);
+        dialog.apply_drop(dropped, None);
+        self.tabs.push(Tab::Open(Box::new(dialog)));
+        self.active = self.tabs.len() - 1;
     }
 
     fn request_close_tab(&mut self, index: usize) {
         if self.tabs[index].modified() {
-            self.active = Some(index);
+            self.active = index;
             self.confirm = Some(Confirm::CloseTab(index));
         } else {
             self.close_tab(index);
@@ -176,25 +190,32 @@ impl App {
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
+        let mut new_tab = false;
         ui.horizontal_wrapped(|ui| {
-            if ui.selectable_label(self.active.is_none(), "Open…").clicked() {
-                self.active = None;
-            }
             for (i, tab) in self.tabs.iter().enumerate() {
-                ui.separator();
+                if i > 0 {
+                    ui.separator();
+                }
                 let mut label = tab.title();
                 if label.chars().count() > 48 {
                     label = format!("{}…", label.chars().take(47).collect::<String>());
                 }
-                let response = ui.selectable_label(self.active == Some(i), label);
+                let response = ui.selectable_label(self.active == i, label);
                 if response.clicked() {
-                    self.active = Some(i);
+                    self.active = i;
                 }
                 if response.middle_clicked() || ui.small_button("×").on_hover_text(if cfg!(target_os = "macos") { "Close (Cmd+W)" } else { "Close (Ctrl+W)" }).clicked() {
                     close = Some(i);
                 }
             }
+            ui.separator();
+            if ui.small_button("+").on_hover_text("New Open tab").clicked() {
+                new_tab = true;
+            }
         });
+        if new_tab {
+            self.open_new_tab(&[]);
+        }
         if let Some(i) = close {
             self.request_close_tab(i);
         }
@@ -205,14 +226,14 @@ impl App {
         let message = match confirm {
             Confirm::CloseTab(i) => match &self.tabs[i] {
                 Tab::Compare(c) => format!("Save changes to {}?", c.modified_names().join(" and ")),
-                Tab::Folder(_) | Tab::Image(_) | Tab::Notice { .. } => String::new(),
+                Tab::Folder(_) | Tab::Image(_) | Tab::Notice { .. } | Tab::Open(_) => String::new(),
             },
             Confirm::Refresh(i) => match &self.tabs[i] {
                 Tab::Compare(c) => format!(
                     "Refreshing reloads both files from disk. Save changes to {} first?",
                     c.modified_names().join(" and ")
                 ),
-                Tab::Folder(_) | Tab::Image(_) | Tab::Notice { .. } => String::new(),
+                Tab::Folder(_) | Tab::Image(_) | Tab::Notice { .. } | Tab::Open(_) => String::new(),
             },
             Confirm::Quit => "Some comparisons have unsaved changes. Save them before quitting?".to_string(),
         };
@@ -242,7 +263,7 @@ impl App {
                 let saved = !save
                     || match &mut self.tabs[i] {
                         Tab::Compare(c) => c.save(),
-                        Tab::Folder(_) | Tab::Image(_) | Tab::Notice { .. } => true,
+                        Tab::Folder(_) | Tab::Image(_) | Tab::Notice { .. } | Tab::Open(_) => true,
                     };
                 if saved {
                     self.close_tab(i);
@@ -261,7 +282,7 @@ impl App {
                         && !c.save()
                     {
                         // Leave the failed tab open with its error showing.
-                        self.active = Some(i);
+                        self.active = i;
                         return;
                     }
                 }
@@ -285,11 +306,16 @@ impl eframe::App for App {
         }
 
         // Ctrl+W (Cmd+W on macOS) closes the current tab, asking first if it has unsaved changes.
-        if self.confirm.is_none()
-            && let Some(i) = self.active
-            && ctx.input_mut(|inp| inp.consume_key(egui::Modifiers::COMMAND, egui::Key::W))
-        {
-            self.request_close_tab(i);
+        if self.confirm.is_none() && ctx.input_mut(|inp| inp.consume_key(egui::Modifiers::COMMAND, egui::Key::W)) {
+            self.request_close_tab(self.active);
+        }
+
+        // Dropping files on anything but an Open tab starts a new Open tab (keeps the diff in progress).
+        if !matches!(self.tabs[self.active], Tab::Open(_)) {
+            let dropped = open_dialog::dropped_paths(&ctx);
+            if !dropped.is_empty() {
+                self.open_new_tab(&dropped);
+            }
         }
 
         egui::Panel::top("tabs").show(ui, |ui| {
@@ -299,13 +325,13 @@ impl eframe::App for App {
         });
 
         let mut open_files = None;
-        egui::CentralPanel::default().show(ui, |ui| match self.active {
-            None => {
-                if let Some(request) = self.dialog.ui(ui) {
-                    self.handle_request(request);
+        let mut request = None;
+        let i = self.active;
+        egui::CentralPanel::default().show(ui, |ui| {
+            match &mut self.tabs[i] {
+                Tab::Open(dialog) => {
+                    request = dialog.ui(ui).map(|r| (r, dialog.state().clone()));
                 }
-            }
-            Some(i) => match &mut self.tabs[i] {
                 Tab::Compare(view) => {
                     if refresh_pressed(ui) {
                         view.request_refresh();
@@ -338,8 +364,13 @@ impl eframe::App for App {
                     ui.add_space(8.0);
                     ui.label(text.as_str());
                 }
-            },
+            }
         });
+
+        if let Some((request, state)) = request {
+            self.template = state;
+            self.handle_request(request);
+        }
 
         if let Some((left, right)) = open_files {
             self.open_file_compare(&left, &right);
@@ -348,7 +379,7 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, STORAGE_KEY, self.dialog.state());
+        eframe::set_value(storage, STORAGE_KEY, &self.template);
         eframe::set_value(storage, FOLDER_OPTIONS_KEY, &self.folder_options);
     }
 }

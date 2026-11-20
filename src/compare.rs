@@ -340,8 +340,24 @@ impl FileCompare {
             .map(|l| display_width(l))
             .max()
             .unwrap_or(0);
-        for (pane, folds) in self.panes.iter().zip(&mut self.folds) {
-            *folds = if json_format::is_json_path(&pane.file.path) { json_format::folds(&pane.file.lines) } else { Vec::new() };
+        for side in 0..2 {
+            let pane = &self.panes[side];
+            self.folds[side] = if json_format::is_json_path(&pane.file.path) {
+                json_format::folds(&pane.file.lines)
+            } else {
+                Vec::new()
+            };
+            // Text outside any JSON fold folds by indentation, but only where both sides are
+            // identical, so a fold can never hide a difference and always matches on both sides.
+            let rows = &self.model.row_of_line[side];
+            let json = &self.folds[side];
+            let usable = |f: &Fold| {
+                (rows[f.start]..=rows[f.end]).all(|r| self.model.rows[r].block.is_none())
+                    && json.iter().all(|j| f.end < j.start || j.end < f.start)
+            };
+            let extra: Vec<Fold> = json_format::indent_folds(&pane.file.lines).into_iter().filter(usable).collect();
+            self.folds[side].extend(extra);
+            self.folds[side].sort_by_key(|f| f.start);
         }
         self.rebuild_view();
     }
@@ -1820,6 +1836,44 @@ mod tests {
         assert!(!v.folded_diff.is_empty());
         v.toggle_fold(1, 1);
         assert_eq!(v.shown.len(), v.model.rows.len());
+    }
+
+    #[test]
+    fn indent_folds_only_where_both_sides_are_identical() {
+        let same = "\n\nAAA\n    AAA\n        AAA\n            AAA";
+        let mut v = FileCompare::new(json_file(same), json_file(same));
+        v.toggle_fold(0, 3);
+        assert_eq!(shown_lines(&v, 0), [0, 1, 2, 3]);
+        assert_eq!(shown_lines(&v, 1), [0, 1, 2, 3]);
+        // A difference deep inside stops the parents folding but not unchanged siblings.
+        let other = "\n\nAAA\n    AAA\n        AAA\n            CCC";
+        let v = FileCompare::new(json_file(same), json_file(other));
+        assert!(v.folds[0].is_empty() && v.folds[1].is_empty());
+        let l = "A\n    x\n    y\nB\n    z\n    w";
+        let r = "A\n    x\n    y\nB\n    z\n    q";
+        let v = FileCompare::new(json_file(l), json_file(r));
+        assert_eq!(v.folds[0].iter().map(|f| f.start).collect::<Vec<_>>(), [0]);
+    }
+
+    #[test]
+    fn json_key_missing_on_one_side_folds_there() {
+        let left = "{\n  \"a\": 1,\n  \"x\": {\n    \"p\": 1,\n    \"q\": 2\n  },\n  \"z\": 3\n}";
+        let right = "{\n  \"a\": 1,\n  \"z\": 3\n}";
+        let mut v = FileCompare::new(json_file(left), json_file(right));
+        v.toggle_fold(0, 2);
+        assert_eq!(shown_lines(&v, 0), [0, 1, 2, 6, 7]);
+        assert_eq!(shown_lines(&v, 1), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn indent_folds_work_beside_json_folds() {
+        let aaa = "AAA\n    AAA\n        AAA\n            AAA";
+        let left = format!("{{\n    \"a\": [\n        1,\n        2\n    ]\n}}\n\n{aaa}");
+        let mut v = FileCompare::new(json_file(&left), json_file(aaa));
+        assert_eq!(v.folds[0].iter().map(|f| f.start).collect::<Vec<_>>(), [0, 1, 7, 8, 9]);
+        v.toggle_fold(1, 1);
+        assert_eq!(shown_lines(&v, 1), [0, 1]);
+        assert_eq!(shown_lines(&v, 0), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]

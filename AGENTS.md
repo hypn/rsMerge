@@ -29,10 +29,13 @@ tests, keep any GUI runs short (`WAYLAND_DISPLAY= ./target/debug/rsmerge …`, s
 
 ## Layout
 
-- `main.rs`: app shell, tabs, unsaved-changes prompts, Ctrl+W, F5 routing.
+- `main.rs`: app shell, tabs (`Tab::Open` is a tab type, so there can be several; `App::template`
+  seeds new ones with the recent list and options), unsaved-changes prompts, Ctrl+W, F5 routing.
+  Files dropped on a non-Open tab spawn a new Open tab.
   `App::open_file_compare` is the single entry point into the file view (Open screen, folder
   double-click, CLI).
-- `open_dialog.rs`: Select Files or Folders screen.
+- `open_dialog.rs`: Select Files or Folders screen. One file dropped goes under the pointer, else
+  alternates left/right (`apply_drop`).
 - `compare.rs`: editable side-by-side view. Custom painted, one row model for both panes. Every
   edit is a line-range replacement (`edit`), which drives undo/redo, copy-difference and filler
   typing; the diff re-runs after each edit.
@@ -42,6 +45,9 @@ tests, keep any GUI runs short (`WAYLAND_DISPLAY= ./target/debug/rsmerge …`, s
   button, which rewrites both sides as one joined undo step.
   It also finds foldable objects/arrays (`folds`), keyed by property path so a fold applies to both
   sides; folding in `compare.rs` is view-only (`shown`/`hidden`), the diff still runs on all lines.
+  `indent_folds` adds indentation folds for text outside JSON folds, kept only where the rows have
+  no differences, so a fold never hides a difference and exists on both sides. A row is hidden
+  only when both sides' lines are hidden.
 - `text_file.rs`: load/save keeping encoding, BOM, EOL; missing files open empty and are created
   on save.
 - `image_diff.rs`: pixel diff (no egui) with a tolerance, grouped into regions for Prev/Next.

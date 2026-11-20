@@ -102,6 +102,47 @@ pub fn folds(lines: &[String]) -> Vec<Fold> {
     out
 }
 
+/// Folds for plain text: a line folds every following line indented deeper than it (blank lines
+/// don't end a fold). The path is the chain of header texts, with a counter for repeated headers,
+/// so the same section folds on both sides.
+pub fn indent_folds(lines: &[String]) -> Vec<Fold> {
+    struct Frame {
+        indent: usize,
+        start: usize,
+        path: String,
+    }
+    let indent_of = |l: &str| l.chars().take_while(|c| c.is_whitespace()).map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>();
+    let mut out = Vec::new();
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut last = 0;
+    let mut close = |stack: &mut Vec<Frame>, keep: Option<usize>, last: usize| {
+        while stack.last().is_some_and(|f| keep.is_none_or(|k| f.indent >= k)) {
+            let f = stack.pop().expect("checked non-empty");
+            if last > f.start {
+                out.push(Fold { start: f.start, end: last, path: f.path });
+            }
+        }
+    };
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = indent_of(line);
+        close(&mut stack, Some(indent), last);
+        // The \u{1} root keeps these paths distinct from JSON property paths.
+        let base = format!("{}\0{}", stack.last().map_or("\u{1}", |f| f.path.as_str()), line.trim());
+        let n = seen.entry(base.clone()).or_insert(0);
+        let path = format!("{base}\0{n}");
+        *n += 1;
+        stack.push(Frame { indent, start: i, path });
+        last = i;
+    }
+    close(&mut stack, None, last);
+    out.sort_by_key(|f| f.start);
+    out
+}
+
 /// Sorts object keys explicitly so the order doesn't depend on serde_json's map features.
 fn sorted(value: Value) -> Value {
     match value {
@@ -118,6 +159,15 @@ fn sorted(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indent_folds_nest_and_skip_blank_lines() {
+        let lines: Vec<String> = ["", "AAA", "    AAA", "", "        AAA", "            AAA", "BBB"].map(String::from).into();
+        let f = indent_folds(&lines);
+        let spans: Vec<_> = f.iter().map(|f| (f.start, f.end)).collect();
+        assert_eq!(spans, [(1, 5), (2, 5), (4, 5)]);
+        assert_ne!(f[0].path, f[1].path);
+    }
 
     #[test]
     fn sorts_nested_keys_and_indents() {

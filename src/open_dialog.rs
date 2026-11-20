@@ -7,7 +7,7 @@ const MAX_RECENT: usize = 20;
 const LABEL_WIDTH: f32 = 48.0;
 
 /// State remembered between runs.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Persisted {
     left: String,
@@ -125,15 +125,30 @@ pub struct OpenDialog {
     state: Persisted,
     left_rect: egui::Rect,
     right_rect: egui::Rect,
+    /// Field the next single dropped item fills; alternates left/right.
+    next_drop: Side,
+}
+
+/// Non-empty paths dropped onto the window this frame.
+pub fn dropped_paths(ctx: &egui::Context) -> Vec<PathBuf> {
+    ctx.input(|i| {
+        i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
+    })
 }
 
 impl OpenDialog {
     pub fn new(state: Persisted) -> Self {
         Self {
             state,
+            next_drop: Side::Left,
             left_rect: egui::Rect::NOTHING,
             right_rect: egui::Rect::NOTHING,
         }
+    }
+
+    /// A fresh dialog sharing the recent list and options, but with empty paths.
+    pub fn from_template(template: &Persisted) -> Self {
+        Self::new(Persisted { left: String::new(), right: String::new(), ..template.clone() })
     }
 
     pub fn state(&self) -> &Persisted {
@@ -217,37 +232,35 @@ impl OpenDialog {
         });
     }
 
-    /// Dropping one item fills the field under the pointer (or the first empty one);
+    /// Dropping one item fills the field under the pointer, else alternates left/right;
     /// dropping two fills both.
-    fn handle_drops(&mut self, ctx: &egui::Context) {
-        let (dropped, pointer) = ctx.input(|i| {
-            let paths: Vec<PathBuf> = i
-                .raw
-                .dropped_files
-                .iter()
-                .map(|f| f.path().to_path_buf())
-                .filter(|p| !p.as_os_str().is_empty())
-                .collect();
-            (paths, i.pointer.latest_pos())
-        });
-        match dropped.as_slice() {
+    pub fn apply_drop(&mut self, dropped: &[PathBuf], pointer: Option<egui::Pos2>) {
+        match dropped {
             [] => {}
             [one] => {
                 let over = |rect: egui::Rect| pointer.is_some_and(|p| rect.expand(8.0).contains(p));
                 let side = if over(self.right_rect) {
                     Side::Right
-                } else if over(self.left_rect) || self.state.left.trim().is_empty() || !self.state.right.trim().is_empty() {
+                } else if over(self.left_rect) {
                     Side::Left
                 } else {
-                    Side::Right
+                    self.next_drop
                 };
                 *self.field(side) = one.display().to_string();
+                self.next_drop = if side == Side::Left { Side::Right } else { Side::Left };
             }
             [first, second, ..] => {
                 self.state.left = first.display().to_string();
                 self.state.right = second.display().to_string();
+                self.next_drop = Side::Left;
             }
         }
+    }
+
+    fn handle_drops(&mut self, ctx: &egui::Context) {
+        let dropped = dropped_paths(ctx);
+        let pointer = ctx.input(|i| i.pointer.latest_pos());
+        self.apply_drop(&dropped, pointer);
     }
 
     fn submit(&mut self, plan: Plan) -> Option<Request> {

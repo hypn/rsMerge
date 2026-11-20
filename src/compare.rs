@@ -96,6 +96,13 @@ impl Pane {
         (self.anchor.min(self.cursor), self.anchor.max(self.cursor))
     }
 
+    /// Selection start and the last line it covers; a selection ending at the start of a line
+    /// doesn't include that line.
+    fn selected_lines(&self) -> (Pos, usize) {
+        let (a, b) = self.selection();
+        (a, if b.line > a.line && b.col == 0 { b.line - 1 } else { b.line })
+    }
+
     fn has_selection(&self) -> bool {
         self.anchor != self.cursor
     }
@@ -678,6 +685,92 @@ impl FileCompare {
         self.replace_range(self.active, a, b, text, kind);
     }
 
+    /// Shift+Tab: removes one indent level from every selected line on the active side.
+    fn outdent(&mut self) {
+        let side = self.active;
+        let pane = &self.panes[side];
+        if pane.filler.is_some() {
+            return;
+        }
+        let (a, last) = pane.selected_lines();
+        let unit = indent_unit(&pane.file.lines, a.line.saturating_sub(100), (last + 100).min(pane.last_line()));
+        let removed: Vec<usize> = (a.line..=last).map(|l| outdent_len(pane.line(l), unit)).collect();
+        if removed.iter().all(|&n| n == 0) {
+            return;
+        }
+        let new: Vec<String> = (a.line..=last)
+            .zip(&removed)
+            .map(|(l, &n)| pane.line(l).chars().skip(n).collect())
+            .collect();
+        let shift_col = |p: Pos| match p.line.checked_sub(a.line).and_then(|i| removed.get(i)) {
+            Some(&n) => Pos::new(p.line, p.col.saturating_sub(n)),
+            None => p,
+        };
+        let (anchor, cursor) = (shift_col(pane.anchor), shift_col(pane.cursor));
+        self.edit(side, a.line, last + 1, new, cursor, EditKind::Other);
+        self.panes[side].anchor = anchor;
+    }
+
+    /// Tab with a selection: adds one indent level to every selected non-blank line.
+    fn indent(&mut self) {
+        let side = self.active;
+        let pane = &self.panes[side];
+        let (a, last) = pane.selected_lines();
+        let unit = indent_unit(&pane.file.lines, a.line.saturating_sub(100), (last + 100).min(pane.last_line()));
+        let pad = indent_pad(&pane.file.lines, a.line.saturating_sub(100), (last + 100).min(pane.last_line()), unit);
+        let added: Vec<usize> =
+            (a.line..=last).map(|l| if pane.line(l).trim().is_empty() { 0 } else { pad.chars().count() }).collect();
+        let new: Vec<String> = (a.line..=last)
+            .zip(&added)
+            .map(|(l, &n)| if n == 0 { pane.line(l).to_string() } else { format!("{pad}{}", pane.line(l)) })
+            .collect();
+        let shift_col = |p: Pos| match p.line.checked_sub(a.line).and_then(|i| added.get(i)) {
+            Some(&n) if p.col > 0 => Pos::new(p.line, p.col + n),
+            _ => p,
+        };
+        let (anchor, cursor) = (shift_col(pane.anchor), shift_col(pane.cursor));
+        self.edit(side, a.line, last + 1, new, cursor, EditKind::Other);
+        self.panes[side].anchor = anchor;
+    }
+
+    /// Sorts the selected lines (or the whole file) on the active side as one undo step.
+    fn sort_lines(&mut self, numeric: bool) {
+        let side = self.active;
+        let pane = &self.panes[side];
+        let (start, last) = if pane.has_selection() { (pane.selection().0.line, pane.selected_lines().1) } else { (0, pane.last_line()) };
+        let old = pane.file.lines.get(start..=last).unwrap_or_default().to_vec();
+        let mut new = old.clone();
+        if numeric {
+            new.sort_by(|a, b| natural_cmp(a, b));
+        } else {
+            new.sort();
+        }
+        if new == old {
+            return;
+        }
+        let (anchor, cursor) = (pane.anchor, pane.cursor);
+        self.edit(side, start, last + 1, new, cursor, EditKind::Other);
+        let pane = &mut self.panes[side];
+        (pane.anchor, pane.cursor) = (pane.clamp(anchor), pane.clamp(cursor));
+    }
+
+    /// Removes repeated lines (keeping the first of each) in the selection or whole active side.
+    fn unique_lines(&mut self) {
+        let side = self.active;
+        let pane = &self.panes[side];
+        let (start, last) = if pane.has_selection() { (pane.selection().0.line, pane.selected_lines().1) } else { (0, pane.last_line()) };
+        let old = pane.file.lines.get(start..=last).unwrap_or_default().to_vec();
+        let mut seen = HashSet::new();
+        let new: Vec<String> = old.iter().filter(|l| seen.insert(l.as_str())).cloned().collect();
+        if new.len() == old.len() {
+            return;
+        }
+        let (anchor, cursor) = (pane.anchor, pane.cursor);
+        self.edit(side, start, last + 1, new, cursor, EditKind::Other);
+        let pane = &mut self.panes[side];
+        (pane.anchor, pane.cursor) = (pane.clamp(anchor), pane.clamp(cursor));
+    }
+
     fn delete_selection(&mut self) {
         let (a, b) = self.panes[self.active].selection();
         self.replace_range(self.active, a, b, "", EditKind::Other);
@@ -941,7 +1034,13 @@ impl FileCompare {
             Key::Backspace => self.backspace(),
             Key::Delete => self.delete_forward(),
             Key::Enter => self.insert_text("\n"),
+            Key::Tab if !shift && self.panes[self.active].has_selection() && self.panes[self.active].filler.is_none() => {
+                self.indent();
+            }
             Key::Tab if !shift => self.insert_text("\t"),
+            Key::Tab => self.outdent(),
+            Key::F9 => self.sort_lines(true),
+            Key::F10 => self.unique_lines(),
             Key::A if m.command => {
                 let pane = &mut self.panes[self.active];
                 pane.anchor = Pos::default();
@@ -959,8 +1058,11 @@ impl FileCompare {
 
     // ----- UI -----
 
-    pub fn ui(&mut self, ui: &mut Ui) {
-        if ui.memory(|m| m.focused().is_none()) {
+    /// `grab_focus` is false while something else (a modal) should keep keyboard focus.
+    pub fn ui(&mut self, ui: &mut Ui, grab_focus: bool) {
+        // Keep keyboard focus in the text area, so clicking a toolbar button doesn't leave Tab
+        // and typing going to the buttons.
+        if grab_focus && ui.memory(|m| m.focused() != Some(self.id)) {
             self.focus(ui.ctx());
         }
         let focused = ui.memory(|m| m.has_focus(self.id));
@@ -1095,6 +1197,20 @@ impl FileCompare {
             ui.checkbox(&mut self.options.ignore_case, "Ignore case");
             if self.options != before {
                 self.rediff();
+                acted = true;
+            }
+            ui.separator();
+            let sort_target = "the selected lines, or the whole file with no selection, on the side with the cursor";
+            if ui.button("Sort Lines").on_hover_text(format!("Sort {sort_target}")).clicked() {
+                self.sort_lines(false);
+                acted = true;
+            }
+            if ui.button("Sort Numeric").on_hover_text(format!("Sort {sort_target}, numbers by value so 2 comes before 10 (F9)")).clicked() {
+                self.sort_lines(true);
+                acted = true;
+            }
+            if ui.button("Unique Lines").on_hover_text(format!("Remove repeated lines, keeping the first of each, in {sort_target} (F10)")).clicked() {
+                self.unique_lines();
                 acted = true;
             }
             if self.paths().iter().any(|p| json_format::is_json_path(p)) {
@@ -1689,6 +1805,76 @@ fn word_boundary(line: &str, col: usize, forward: bool) -> usize {
     i
 }
 
+/// The indent step used around some lines: the smallest change in space indentation between
+/// neighbouring non-blank lines, else 4.
+fn indent_unit(lines: &[String], from: usize, to: usize) -> usize {
+    let spaces = |l: &String| l.chars().take_while(|&c| c == ' ').count();
+    let mut unit = usize::MAX;
+    let mut prev = None;
+    for l in lines[from..=to].iter().filter(|l| !l.trim().is_empty()) {
+        let n = spaces(l);
+        if let Some(p) = prev.filter(|&p| p != n) {
+            unit = unit.min(n.abs_diff(p));
+        }
+        prev = Some(n);
+    }
+    if unit == usize::MAX { 4 } else { unit }
+}
+
+/// Orders text with runs of digits compared by value (`2` < `10`); other text by character.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (a.peek().copied(), b.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, _) => return Ordering::Less,
+            (_, None) => return Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let run = |it: &mut std::iter::Peekable<std::str::Chars>| {
+                    let mut digits = String::new();
+                    while let Some(c) = it.next_if(char::is_ascii_digit) {
+                        digits.push(c);
+                    }
+                    digits
+                };
+                let (x, y) = (run(&mut a), run(&mut b));
+                let (tx, ty) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
+                // Longer (after leading zeros) means bigger; equal lengths compare as text.
+                let order = tx.len().cmp(&ty.len()).then_with(|| tx.cmp(ty)).then_with(|| x.len().cmp(&y.len()));
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            (Some(x), Some(y)) => {
+                if x != y {
+                    return x.cmp(&y);
+                }
+                a.next();
+                b.next();
+            }
+        }
+    }
+}
+
+/// What one indent level is made of: a tab if nearby lines are tab-indented (or nothing is
+/// indented), otherwise `unit` spaces.
+fn indent_pad(lines: &[String], from: usize, to: usize, unit: usize) -> String {
+    let near = &lines[from..=to];
+    let tabs = near.iter().filter(|l| l.starts_with('\t')).count();
+    let spaces = near.iter().filter(|l| l.starts_with(' ')).count();
+    if tabs >= spaces { "\t".into() } else { " ".repeat(unit) }
+}
+
+/// How many leading characters one outdent removes: a tab, or spaces back to the previous level.
+fn outdent_len(line: &str, unit: usize) -> usize {
+    if line.starts_with('\t') {
+        return 1;
+    }
+    let spaces = line.chars().take_while(|&c| c == ' ').count();
+    if spaces == 0 { 0 } else { (spaces - 1) % unit + 1 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1874,6 +2060,81 @@ mod tests {
         v.toggle_fold(1, 1);
         assert_eq!(shown_lines(&v, 1), [0, 1]);
         assert_eq!(shown_lines(&v, 0), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn shift_tab_outdents_each_selected_line_one_level() {
+        let text = "a\n  b\n    c\n\tt\nd";
+        let mut v = FileCompare::new(file(text), file("x"));
+        assert_eq!(indent_unit(&v.panes[0].file.lines, 0, 4), 2);
+        v.panes[0].anchor = Pos::new(1, 1);
+        v.panes[0].cursor = Pos::new(3, 1);
+        v.outdent();
+        assert_eq!(lines(&v, 0), ["a", "b", "  c", "t", "d"]);
+        assert_eq!(v.panes[0].anchor, Pos::new(1, 0));
+        v.outdent();
+        assert_eq!(lines(&v, 0), ["a", "b", "c", "t", "d"]);
+        let before = v.undo.len();
+        v.outdent();
+        assert_eq!(v.undo.len(), before);
+        // Odd indent falls back to the previous level; undo restores in one step.
+        assert_eq!(outdent_len("      x", 4), 2);
+        v.undo();
+        assert_eq!(lines(&v, 0), ["a", "b", "  c", "t", "d"]);
+    }
+
+    #[test]
+    fn tab_indents_selected_lines_in_the_files_style() {
+        let mut v = FileCompare::new(file("a\n  b\n\n    c"), file("x"));
+        v.panes[0].anchor = Pos::new(0, 1);
+        v.panes[0].cursor = Pos::new(3, 2);
+        v.indent();
+        assert_eq!(lines(&v, 0), ["  a", "    b", "", "      c"]);
+        assert_eq!(v.panes[0].anchor, Pos::new(0, 3));
+        let mut v = FileCompare::new(file("a\n\tb"), file("x"));
+        v.panes[0].anchor = Pos::new(0, 0);
+        v.panes[0].cursor = Pos::new(1, 1);
+        v.indent();
+        assert_eq!(lines(&v, 0), ["\ta", "\t\tb"]);
+        v.undo();
+        assert_eq!(lines(&v, 0), ["a", "\tb"]);
+    }
+
+    #[test]
+    fn sorting_lines_plain_and_numeric_on_a_selection() {
+        let mut v = FileCompare::new(file("10\n2\nb\n1\nitem10\nitem9"), file("x"));
+        v.sort_lines(false);
+        assert_eq!(lines(&v, 0), ["1", "10", "2", "b", "item10", "item9"]);
+        v.sort_lines(true);
+        assert_eq!(lines(&v, 0), ["1", "2", "10", "b", "item9", "item10"]);
+        // Only the selected lines move; an already sorted selection adds no undo step.
+        let mut v = FileCompare::new(file("z\n10\n2\na"), file("x"));
+        v.panes[0].anchor = Pos::new(1, 0);
+        v.panes[0].cursor = Pos::new(2, 1);
+        v.sort_lines(true);
+        assert_eq!(lines(&v, 0), ["z", "2", "10", "a"]);
+        let n = v.undo.len();
+        v.sort_lines(true);
+        assert_eq!(v.undo.len(), n);
+        v.undo();
+        assert_eq!(lines(&v, 0), ["z", "10", "2", "a"]);
+        assert_eq!(natural_cmp("a007", "a7"), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn unique_lines_keeps_first_of_each_and_undoes() {
+        let mut v = FileCompare::new(file("a\nb\na\nc\nb"), file("x"));
+        v.unique_lines();
+        assert_eq!(lines(&v, 0), ["a", "b", "c"]);
+        let n = v.undo.len();
+        v.unique_lines();
+        assert_eq!(v.undo.len(), n);
+        v.undo();
+        assert_eq!(lines(&v, 0), ["a", "b", "a", "c", "b"]);
+        v.panes[0].anchor = Pos::new(2, 0);
+        v.panes[0].cursor = Pos::new(4, 1);
+        v.unique_lines();
+        assert_eq!(lines(&v, 0), ["a", "b", "a", "c", "b"]);
     }
 
     #[test]

@@ -39,6 +39,10 @@ tests, keep any GUI runs short (`WAYLAND_DISPLAY= ./target/debug/rsmerge …`, s
 - `compare.rs`: editable side-by-side view. Custom painted, one row model for both panes. Every
   edit is a line-range replacement (`edit`), which drives undo/redo, copy-difference and filler
   typing; the diff re-runs after each edit.
+  Line-block edits built on `edit`: `indent`/`outdent` (Tab/Shift+Tab; style detected by
+  `indent_unit`/`indent_pad`), `sort_lines` (F9 numeric, via `natural_cmp`) and `unique_lines`
+  (F10); all act on the selection or the whole active side. `FileCompare::ui` keeps keyboard
+  focus in the text area (Tab is trapped there).
 - `diff.rs`: line diff (interned line ids + Myers; Histogram in `similar` is far too slow),
   aligned rows with filler lines, word-level inline diff.
 - `json_format.rs`: canonical JSON (sorted keys, 4-space indent) for the file view's "Format JSON"

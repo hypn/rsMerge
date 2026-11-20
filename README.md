@@ -14,6 +14,9 @@ A fast, WinMerge-style compare tool for files, folders and images, written in Ru
   (keeps each file's encoding, BOM and line endings). JSON files get a **Format JSON** button
   (sorted keys, 4-space indent) that's a single undo step. JSON objects and arrays can be
   folded; other text folds by indentation, but only where both sides are identical.
+  Tab / Shift+Tab indent and outdent the selected lines (detecting tabs or spaces from nearby
+  lines), and **Sort Lines**, **Sort Numeric** (F9) and **Unique Lines** (F10) work on the
+  selection, or the whole side with no selection.
 - **Image compare:** side by side or as a blended overlay with shared zoom and pan, changed
   pixels highlighted, step through changed regions, adjustable colour tolerance.
 - **Folder compare:** tree or flat list with Show toggles (Identical / Different / Left only /
@@ -30,6 +33,9 @@ A fast, WinMerge-style compare tool for files, folders and images, written in Ru
 | Next / previous difference | Alt+Down / Alt+Up | Option+Down / Option+Up |
 | Copy difference to right / left | Alt+Right / Alt+Left | Cmd+Option+Right / Left |
 | Undo / redo | Ctrl+Z / Ctrl+Y | Cmd+Z / Cmd+Shift+Z |
+| Indent / outdent selected lines one level | Tab / Shift+Tab | Tab / Shift+Tab |
+| Sort lines numerically (selection, or whole side) | F9 | F9 |
+| Remove duplicate lines (selection, or whole side) | F10 | F10 |
 | Save changed sides | Ctrl+S | Cmd+S |
 | Refresh (reload files / rescan folders) | F5 | F5 |
 | Close tab | Ctrl+W | Cmd+W |

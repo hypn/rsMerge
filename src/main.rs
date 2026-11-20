@@ -336,7 +336,7 @@ impl eframe::App for App {
                     if refresh_pressed(ui) {
                         view.request_refresh();
                     }
-                    view.ui(ui);
+                    view.ui(ui, self.confirm.is_none());
                     if view.take_refresh_request() && self.confirm.is_none() {
                         if view.modified() {
                             self.confirm = Some(Confirm::Refresh(i));
